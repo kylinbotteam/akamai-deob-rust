@@ -1,8 +1,7 @@
 use swc_common::{sync::Lrc, Globals, SourceMap};
 use swc_ecma_ast::*;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
-use swc_ecma_transforms::pass::noop;
-use swc_ecma_visit::{Fold, VisitMut, visit_mut_obj_and_computed, VisitMutWith};
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 struct Deobfuscator;
 
@@ -35,16 +34,16 @@ fn main() {
     "#;
 
     let cm: Lrc<SourceMap> = Default::default();
-    let globals = Globals::new();
+    let _globals = Globals::new();
 
     let fm = cm.new_source_file(
-        swc_common::FileName::Custom("input.js".into()),
+        swc_common::FileName::Custom("input.js".into()).into(),
         code.into(),
     );
 
     let lexer = swc_ecma_parser::lexer::Lexer::new(
         Syntax::Es(Default::default()),
-        swc_ecma_parser::EsVersion::Es2020,
+        swc_ecma_ast::EsVersion::Es2020,
         StringInput::from(&*fm),
         None,
     );
@@ -62,10 +61,8 @@ fn main() {
     transformed_module.visit_mut_with(&mut deobfuscator);
 
     // Code generation (pretty print the transformed AST back to JavaScript)
-    let codegen_config = swc_ecma_codegen::Config {
-        minify: false,
-        ..Default::default()
-    };
+    let mut codegen_config = swc_ecma_codegen::Config::default();
+    codegen_config.minify = false;
 
     let mut buf = vec![];
     {
