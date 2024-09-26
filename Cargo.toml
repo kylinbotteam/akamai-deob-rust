@@ -1,0 +1,12 @@
+[package]
+name = "akamai-deob-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+swc_common = "0.40"
+swc_ecma_ast = "0.121"
+swc_ecma_visit = "0.107"
+swc_ecma_parser = "0.152"
+swc_ecma_transforms = "0.243"
+swc_ecma_codegen = "0.158"
