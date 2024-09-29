@@ -1,7 +1,7 @@
 use swc_common::{sync::Lrc, Globals, SourceMap, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use std::collections::HashMap;
 
@@ -109,6 +109,154 @@ impl VisitMut for ConstantFolder {
     }
 }
 
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    kind: BindingKind,
+    reference_paths: Vec<swc_common::Span>,
+}
+
+
+impl Binding {
+    fn new(name: String, kind: BindingKind) -> Self {
+        Binding {
+            name,
+            kind,
+            reference_paths: vec![],
+        }
+    }
+
+    fn add_reference(&mut self, span: swc_common::Span) {
+        self.reference_paths.push(span);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BindingKind {
+    Var,
+    Let,
+    Const,
+    Function,
+}
+
+#[derive(Debug, Clone)]
+struct Scope {
+    bindings: HashMap<String, Binding>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            bindings: HashMap::new(),
+        }
+    }
+
+    fn add_binding(&mut self, name: String, binding: Binding) {
+        self.bindings.insert(name, binding);
+    }
+
+    fn find_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.bindings.get_mut(name)
+    }
+}
+
+#[derive(Debug)]
+struct ScopeTracker {
+    scopes: Vec<Scope>,
+}
+
+impl ScopeTracker {
+    fn new() -> Self {
+        ScopeTracker {
+            scopes: vec![Scope::new()], // Start with a global scope
+        }
+    }
+
+    fn enter_scope(&mut self) {
+        self.scopes.push(Scope::new());
+    }
+
+    fn exit_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn add_binding(&mut self, name: String, binding: Binding) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.add_binding(name, binding);
+        }
+    }
+
+    fn find_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.find_binding_mut(name) {
+                return Some(binding);
+            }
+        }
+        None
+    }
+}
+struct VarFinder {
+    tracker: ScopeTracker,
+}
+
+impl<'a> Visit for VarFinder {
+    fn visit_var_decl(&mut self, var_decl: &VarDecl) {
+        for decl in &var_decl.decls {
+            if let Pat::Ident(ident) = &decl.name {
+                let binding = Binding::new(
+                    ident.id.sym.to_string(),
+                    match var_decl.kind {
+                        swc_ecma_ast::VarDeclKind::Var => BindingKind::Var,
+                        swc_ecma_ast::VarDeclKind::Let => BindingKind::Let,
+                        swc_ecma_ast::VarDeclKind::Const => BindingKind::Const,
+                    },
+                );
+                self.tracker.add_binding(ident.id.sym.to_string(), binding);
+            }
+        }
+        var_decl.visit_children_with(self);
+    }
+
+    fn visit_fn_decl(&mut self, fn_decl: &FnDecl) {
+        self.tracker.add_binding(
+            fn_decl.ident.sym.to_string(),
+            Binding::new(fn_decl.ident.sym.to_string(), BindingKind::Function),
+        );
+
+        self.tracker.enter_scope();
+
+        for param in &fn_decl.function.params {
+            if let Pat::Ident(ident) = &param.pat {
+                self.tracker.add_binding(
+                    ident.id.sym.to_string(),
+                    Binding::new(ident.id.sym.to_string(), BindingKind::Var),
+                );
+            }
+        }
+
+        fn_decl.function.body.visit_with(self);
+
+        self.tracker.exit_scope();
+    }
+
+    fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+        self.tracker.enter_scope();
+        block.visit_children_with(self);
+        self.tracker.exit_scope();
+    }
+
+    fn visit_ident(&mut self, ident: &Ident) {
+        if let Some(binding) = self.tracker.find_binding_mut(&ident.sym.to_string()) {
+            binding.add_reference(ident.span);
+            println!(
+                "Found reference to '{}': span={:?}",
+                ident.sym, ident.span
+            );
+        } else {
+            println!("No binding found for '{}'", ident.sym);
+        }
+    }
+}
 
 fn main() {
     // Input: Obfuscated JavaScript code as a string
@@ -121,6 +269,13 @@ fn main() {
         const fourtyTwo = 0x25fb + 0x3eb * -0x9 + -0x28e;
         const msg = 'The\x20answer' + '\x20is:';
         console['log'](msg, fourtyTwo);
+
+        const a = 10;
+        function example(b) {
+            const c = b + a;
+            return c;
+        }
+        const d = example;
     "#;
 
     let cm: Lrc<SourceMap> = Default::default();
@@ -154,6 +309,12 @@ fn main() {
 
     // Apply constant folding and propagation
     transformed_module.visit_mut_with(&mut folder);
+
+    // Traverse the AST to find variable definitions
+    let mut var_finder = VarFinder {
+        tracker: ScopeTracker::new(),
+    };
+    transformed_module.visit_with(&mut var_finder);
 
     // Code generation (pretty print the transformed AST back to JavaScript)
     let mut codegen_config = swc_ecma_codegen::Config::default();
