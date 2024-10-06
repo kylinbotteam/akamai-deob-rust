@@ -37,7 +37,7 @@ fn main() -> std::io::Result<()> {
 }
 
 struct Deobfuscator<'a> {
-    builder: &'a AstBuilder<'a>
+    ast: &'a AstBuilder<'a>
 }
 
 impl<'a> VisitMut<'a> for Deobfuscator<'a> {
@@ -47,7 +47,7 @@ impl<'a> VisitMut<'a> for Deobfuscator<'a> {
         let declarations = &mut var_decl.declarations;
         for declarator in declarations.iter_mut() {
             if let Some(init) = & declarator.init {
-                if let Some(simplified_expr) = simplify_expression(self.builder, init) {
+                if let Some(simplified_expr) = simplify_expression(self.ast, init) {
                     declarator.init = Some(simplified_expr);
                 }
             }
@@ -58,7 +58,7 @@ impl<'a> VisitMut<'a> for Deobfuscator<'a> {
         oxc_ast::visit::walk_mut::walk_expression(self, expr);
 
         if let Expression::BinaryExpression(_) = expr {
-            if let Some(simplified_expr) = simplify_expression(self.builder, expr) {
+            if let Some(simplified_expr) = simplify_expression(self.ast, expr) {
                 *expr = simplified_expr;
             }
         }
@@ -173,7 +173,7 @@ fn deob(
     };
     let mut program = ret.program;
     let mut deobfuscator = Deobfuscator{
-        builder: &ast_builder
+        ast: &ast_builder
     };
     deobfuscator.visit_program(&mut program);
 
