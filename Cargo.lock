@@ -3,7 +3,7 @@
 version = 3
 
 [[package]]
-name = "akamai-deob-rust"
+name = "akamai_deob_rust"
 version = "0.1.0"
 dependencies = [
  "cow-utils",
