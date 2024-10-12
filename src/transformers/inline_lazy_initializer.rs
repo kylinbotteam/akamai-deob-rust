@@ -1,8 +1,7 @@
 #![allow(clippy::borrowed_box)]
 
-use oxc_span::SPAN;
 use swc_core::common::DUMMY_SP;
-use swc_core::common::{collections::AHashMap, util::take::Take};
+use swc_core::common::collections::AHashMap;
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{as_folder, noop_visit_mut_type, Fold, VisitMut, VisitMutWith};
 
@@ -10,8 +9,7 @@ use swc_core::ecma::visit::{as_folder, noop_visit_mut_type, Fold, VisitMut, Visi
 pub fn inline_lazy_initializer() -> impl 'static + Fold + VisitMut {
     as_folder(InlineLazyInitializer{
         phase: Phase::Analysis,
-        scope: Default::default(),
-        initializers: Default::default()
+        scope: Default::default()
     })
 }
 
@@ -26,8 +24,7 @@ enum Phase {
 #[derive(Default)]
 struct InlineLazyInitializer<'a> {
     phase: Phase,
-    scope: Scope<'a>,
-    initializers: Vec<&'a Function>
+    scope: Scope<'a>
 }
 #[derive(Default)]
 struct Scope<'a> {
@@ -124,26 +121,10 @@ impl VisitMut for InlineLazyInitializer<'_> {
             }
         }
 
-        // if let Expr::Ident(i) = e {
-        //     if let Some(expr) = self.scope.find_var(&i.to_id()) {
-        //         *e = *expr.clone();
-        //         return;
-        //     }
-        // }
-
         e.visit_mut_children_with(self);
     }
 
-    /// Although span hygiene is magic, bundler creates invalid code in aspect
-    /// of span hygiene. (The bundled code can have two variables with
-    /// identical name with each other, with respect to span hygiene.)
-    ///
-    /// We avoid bugs caused by the bundler's wrong behavior by
-    /// scoping variables.
     fn visit_mut_fn_decl(&mut self, n: &mut FnDecl) {
-        // let scope: Scope<'_> = Scope::new(&self.scope);
-        // let mut v = InlineLazyInitializer { scope };
-        // n.visit_mut_children_with(&mut v);
         n.visit_mut_children_with(self);
 
         if self.phase == Phase::Analysis {
@@ -154,53 +135,6 @@ impl VisitMut for InlineLazyInitializer<'_> {
             }
         }
     }
-
-    // fn visit_mut_prop(&mut self, p: &mut Prop) {
-    //     p.visit_mut_children_with(self);
-
-    //     if let Prop::Shorthand(i) = p {
-    //         if let Some(expr) = self.scope.find_var(&i.to_id()) {
-    //             *p = Prop::KeyValue(KeyValueProp {
-    //                 key: PropName::Ident(i.take().into()),
-    //                 value: expr.clone(),
-    //             });
-    //         }
-    //     }
-    // }
-
-    // fn visit_mut_var_decl(&mut self, var: &mut VarDecl) {
-    //     var.decls.visit_mut_with(self);
-    //
-    //     if let VarDeclKind::Const = var.kind {
-    //         for decl in &var.decls {
-    //             if let Pat::Ident(name) = &decl.name {
-    //                 if let Some(init) = &decl.init {
-    //                     match &**init {
-    //                         Expr::Lit(Lit::Bool(..))
-    //                         | Expr::Lit(Lit::Num(..))
-    //                         | Expr::Lit(Lit::Null(..)) => {
-    //                             self.scope.vars.insert(name.to_id(), init.clone());
-    //                         }
-
-    //                         Expr::Ident(init)
-    //                             if name.span.is_dummy()
-    //                                 || var.span.is_dummy()
-    //                                 || init.span.is_dummy() =>
-    //                         {
-    //                             // This check is required to prevent breaking some codes.
-    //                             if let Some(value) = self.scope.vars.get(&init.to_id()).cloned() {
-    //                                 self.scope.vars.insert(name.to_id(), value);
-    //                             } else {
-    //                                 self.scope.vars.insert(name.to_id(), init.clone().into());
-    //                             }
-    //                         }
-    //                         _ => {}
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
 }
 
 fn is_lazy_initializer<'a>(scope: &Scope<'_>, fn_decl: &'a FnDecl) -> (bool, Option<&'a VarDecl>) {
