@@ -1,181 +1,329 @@
-#![allow(clippy::print_stdout)]
-use std::path::Path;
+use swc_core::common::{FileName, Globals, GLOBALS, Mark, SourceMap, Span, DUMMY_SP};
+use swc_core::common::input::StringInput;
+use swc_core::common::sync::Lrc;
+use swc_core::ecma::codegen::Emitter;
+use swc_core::ecma::codegen::text_writer::JsWriter;
+use swc_core::ecma::parser::{EsSyntax, Parser, Syntax};
+use swc_core::ecma::transforms::optimization::simplify::{expr_simplifier, dead_branch_remover, const_propagation, inlining};
+use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_core::common::pass::Repeated;
+use swc_core::ecma::ast::*;
+use swc_core::ecma::ast::VarDeclKind;
 
-use oxc_allocator::Allocator;
-use oxc_codegen::CodeGenerator;
-use oxc_parser::Parser;
-use oxc_span::{SourceType, SPAN};
-use pico_args::Arguments;
-use oxc_ast::ast::*;
-use oxc_ast::visit::VisitMut;
-use oxc_ast::ast_builder::AstBuilder;
+use std::collections::HashMap;
+use std::fs;
+use std::env;
 
-use std::time::Instant;
+struct Deobfuscator;
 
-// Instruction:
-// create a `test.js`,
-// run `cargo run --example minifier`
-
-fn main() -> std::io::Result<()> {
-    let mut args = Arguments::from_env();
-
-    let name = args.subcommand().ok().flatten().unwrap_or_else(|| String::from("test.js"));
-
-    let path = Path::new(&name);
-    let source_text = std::fs::read_to_string(path)?;
-    let source_type = SourceType::from_path(path).unwrap();
-
-    let allocator = Allocator::default();
-    let start_marker = Instant::now();
-    let printed = deob(&allocator, &source_text, source_type);
-    let dt_ms = start_marker.elapsed();
-    println!("{printed}");
-    println!("elapsed: {dt_ms:?}");
-
-
-    Ok(())
-}
-
-struct Deobfuscator<'a> {
-    ast: &'a AstBuilder<'a>
-}
-
-impl<'a> VisitMut<'a> for Deobfuscator<'a> {
-    fn visit_variable_declaration(&mut self, var_decl: &mut VariableDeclaration<'a>) {
-        oxc_ast::visit::walk_mut::walk_variable_declaration(self, var_decl);
-
-        let declarations = &mut var_decl.declarations;
-        for declarator in declarations.iter_mut() {
-            if let Some(init) = & declarator.init {
-                if let Some(simplified_expr) = simplify_expression(self.ast, init) {
-                    declarator.init = Some(simplified_expr);
-                }
-            }
+impl VisitMut for Deobfuscator {
+    fn visit_mut_ident(&mut self, ident: &mut Ident) {
+        // Simple logic to rename obfuscated variable names
+        if ident.sym.starts_with('_') {
+            ident.sym = format!("var_{}", &ident.sym[1..]).into();
         }
     }
 
-    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        oxc_ast::visit::walk_mut::walk_expression(self, expr);
+    fn visit_mut_var_declarator(&mut self, var: &mut VarDeclarator) {
+        // You can add more transformations for variable declarations here
+        var.visit_mut_children_with(self);
+    }
 
-        if let Expression::BinaryExpression(_) = expr {
-            if let Some(simplified_expr) = simplify_expression(self.ast, expr) {
-                *expr = simplified_expr;
-            }
-        }
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // Simplify complex expressions here
+        expr.visit_mut_children_with(self);
     }
 }
 
-fn simplify_expression<'a>(ast_builder: &AstBuilder<'a>, expr: &Expression<'a>) -> Option<Expression<'a>> {
-    if let Expression::BinaryExpression(binary_expr) = expr {
-        match (&binary_expr.left, &binary_expr.right) {
-            (Expression::StringLiteral(left), Expression::StringLiteral(right)) => {
-                let sum = format!("{}{}", left.value.as_str(), right.value.as_str());
 
-                let lit = ast_builder.alloc_string_literal(SPAN, sum);
+struct ConstantFolder {
+    // Track constants and their values for propagation
+    consts: HashMap<String, Expr>,
+}
 
-                Some(Expression::StringLiteral(lit))
-            },
-            (Expression::NumericLiteral(left), Expression::UnaryExpression(right)) => {
-                match (right.operator, &right.argument) {
-                    (UnaryOperator::UnaryNegation, Expression::NumericLiteral(arg)) => {
-                        match binary_expr.operator {
-                            BinaryOperator::Addition => {
-                                let sum = left.value - arg.value;
-                                let raw_value = format!("{}", sum);
-        
-                                let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-        
-                                Some(Expression::NumericLiteral(lit))
-                            },
-                            BinaryOperator::Subtraction => {
-                                let sum = left.value + arg.value;
-                                let raw_value = format!("{}", sum);
-        
-                                let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-        
-                                Some(Expression::NumericLiteral(lit))
-                            },
-                            BinaryOperator::Multiplication => {
-                                let sum = left.value * (-1.0 * arg.value);
-                                let raw_value = format!("{}", sum);
-        
-                                let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-        
-                                Some(Expression::NumericLiteral(lit))
-                            },
-                            BinaryOperator::Division => {
-                                let sum = left.value / (-1.0 * arg.value);
-                                let raw_value = format!("{}", sum);
-        
-                                let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-        
-                                Some(Expression::NumericLiteral(lit))
-                            },
-                            _ => None,
-                        }
+impl ConstantFolder {
+    fn new() -> Self {
+        ConstantFolder {
+            consts: HashMap::new(),
+        }
+    }
 
-                    },
-                    _ => None
+    fn eval_const_expr(&self, expr: &Expr) -> Option<Expr> {
+        match expr {
+            // Handle numeric constants
+            Expr::Bin(BinExpr { left, op, right, .. }) => {
+                if let (Expr::Lit(Lit::Num(left_num)), Expr::Lit(Lit::Num(right_num))) =
+                    (&**left, &**right)
+                {
+                    let result = match op {
+                        BinaryOp::Add => left_num.value + right_num.value,
+                        BinaryOp::Sub => left_num.value - right_num.value,
+                        BinaryOp::Mul => left_num.value * right_num.value,
+                        BinaryOp::Div => left_num.value / right_num.value,
+                        _ => return None,
+                    };
+                    return Some(Expr::Lit(Lit::Num(Number {
+                        span: DUMMY_SP,
+                        value: result,
+                        raw: None,
+                    })));
+                } else if let (Expr::Lit(Lit::Str(left_str)), Expr::Lit(Lit::Str(right_str))) =
+                (&**left, &**right) {
+                    // Handle string concatenation
+                    if *op == BinaryOp::Add {
+                        let result = format!("{}{}", left_str.value, right_str.value);
+                        return Some(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: result.into(),
+                            raw: None,
+                        })));
+                    } else {
+                        return None
+                    }
+                } else {
+                    return None
                 }
-            },
-            (Expression::NumericLiteral(left), Expression::NumericLiteral(right)) => {
-                match binary_expr.operator {
-                    BinaryOperator::Addition => {
-                        let sum = left.value + right.value;
-                        let raw_value = format!("{}", sum);
-
-                        let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-
-                        Some(Expression::NumericLiteral(lit))
-                    },
-                    BinaryOperator::Subtraction => {
-                        let sum = left.value - right.value;
-                        let raw_value = format!("{}", sum);
-
-                        let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-
-                        Some(Expression::NumericLiteral(lit))
-                    },
-                    BinaryOperator::Multiplication => {
-                        let sum = left.value * right.value;
-                        let raw_value = format!("{}", sum);
-
-                        let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-
-                        Some(Expression::NumericLiteral(lit))
-                    },
-                    BinaryOperator::Division => {
-                        let sum = left.value / right.value;
-                        let raw_value = format!("{}", sum);
-
-                        let lit = ast_builder.alloc_numeric_literal(SPAN, sum, raw_value, NumberBase::Decimal);
-
-                        Some(Expression::NumericLiteral(lit))
-                    },
-                    _ => None,
-                }
-            },
+            }
             _ => None,
         }
-    } else {
+    }
+}
+
+impl VisitMut for ConstantFolder {
+    fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+        if let Some(init) = &declarator.init {
+            if let Expr::Lit(_) = **init {
+                // If this is a constant, store it for propagation
+                if let Pat::Ident(ident) = &declarator.name {
+                    self.consts
+                        .insert(ident.id.sym.to_string(), *init.clone());
+                }
+            } else if let Some(folded) = self.eval_const_expr(init) {
+                // If it's a foldable expression, replace it
+                declarator.init = Some(Box::new(folded));
+            }
+        }
+        declarator.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // Replace variable references with their constant values
+        if let Expr::Ident(ident) = expr {
+            if let Some(const_value) = self.consts.get(&ident.sym.to_string()) {
+                *expr = const_value.clone();
+            }
+        } else {
+            expr.visit_mut_children_with(self);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    kind: BindingKind,
+    reference_paths: Vec<Span>,
+}
+
+
+impl Binding {
+    fn new(name: String, kind: BindingKind) -> Self {
+        Binding {
+            name,
+            kind,
+            reference_paths: vec![],
+        }
+    }
+
+    fn add_reference(&mut self, span: Span) {
+        self.reference_paths.push(span);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BindingKind {
+    Var,
+    Let,
+    Const,
+    Function,
+}
+
+#[derive(Debug, Clone)]
+struct Scope {
+    bindings: HashMap<String, Binding>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            bindings: HashMap::new(),
+        }
+    }
+
+    fn add_binding(&mut self, name: String, binding: Binding) {
+        self.bindings.insert(name, binding);
+    }
+
+    fn find_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.bindings.get_mut(name)
+    }
+}
+
+#[derive(Debug)]
+struct ScopeTracker {
+    scopes: Vec<Scope>,
+}
+
+impl ScopeTracker {
+    fn new() -> Self {
+        ScopeTracker {
+            scopes: vec![Scope::new()], // Start with a global scope
+        }
+    }
+
+    fn enter_scope(&mut self) {
+        self.scopes.push(Scope::new());
+    }
+
+    fn exit_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn add_binding(&mut self, name: String, binding: Binding) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.add_binding(name, binding);
+        }
+    }
+
+    fn find_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.find_binding_mut(name) {
+                return Some(binding);
+            }
+        }
         None
     }
 }
+struct VarFinder {
+    tracker: ScopeTracker,
+}
 
-fn deob(
-    allocator: &Allocator,
-    source_text: &str,
-    source_type: SourceType,
-) -> String {
-    let ret = Parser::new(allocator, source_text, source_type).parse();
-    let ast_builder = AstBuilder{
-        allocator: allocator
-    };
-    let mut program = ret.program;
-    let mut deobfuscator = Deobfuscator{
-        ast: &ast_builder
-    };
-    deobfuscator.visit_program(&mut program);
+impl<'a> Visit for VarFinder {
+    fn visit_var_decl(&mut self, var_decl: &VarDecl) {
+        for decl in &var_decl.decls {
+            if let Pat::Ident(ident) = &decl.name {
+                let binding = Binding::new(
+                    ident.id.sym.to_string(),
+                    match var_decl.kind {
+                        VarDeclKind::Var => BindingKind::Var,
+                        VarDeclKind::Let => BindingKind::Let,
+                        VarDeclKind::Const => BindingKind::Const,
+                    },
+                );
+                self.tracker.add_binding(ident.id.sym.to_string(), binding);
+            }
+        }
+        var_decl.visit_children_with(self);
+    }
 
-    CodeGenerator::new().build(&program).source_text
+    fn visit_fn_decl(&mut self, fn_decl: &FnDecl) {
+        self.tracker.add_binding(
+            fn_decl.ident.sym.to_string(),
+            Binding::new(fn_decl.ident.sym.to_string(), BindingKind::Function),
+        );
+
+        self.tracker.enter_scope();
+
+        for param in &fn_decl.function.params {
+            if let Pat::Ident(ident) = &param.pat {
+                self.tracker.add_binding(
+                    ident.id.sym.to_string(),
+                    Binding::new(ident.id.sym.to_string(), BindingKind::Var),
+                );
+            }
+        }
+
+        fn_decl.function.body.visit_with(self);
+
+        self.tracker.exit_scope();
+    }
+
+    fn visit_block_stmt(&mut self, block: &BlockStmt) {
+        self.tracker.enter_scope();
+        block.visit_children_with(self);
+        self.tracker.exit_scope();
+    }
+
+    fn visit_ident(&mut self, ident: &Ident) {
+        if let Some(binding) = self.tracker.find_binding_mut(&ident.sym.to_string()) {
+            binding.add_reference(ident.span);
+            println!(
+                "Found reference to '{}': span={:?}",
+                ident.sym, ident.span
+            );
+        } else {
+            println!("No binding found for '{}'", ident.sym);
+        }
+    }
+}
+
+fn main() {
+    let default_input = &String::from("test.js");
+    let default_output = &String::from("test-out.js");
+
+    let args: Vec<String> = env::args().collect();
+    let filename = args.get(1).unwrap_or(default_input);
+    let output_filename = args.get(2).unwrap_or(default_output);
+
+    let buf = fs::read(filename).unwrap();
+    let str = std::str::from_utf8(&buf).unwrap();
+
+    let globals = Globals::new();
+    GLOBALS.set(&globals, || {
+        // Setup SWC
+        let cm: Lrc<SourceMap> = Default::default();
+        let fm = cm.new_source_file(
+            FileName::Custom("input.js".into()).into(),
+            str.into(),
+        );
+        // Parse JavaScript code
+        let mut parser = Parser::new(
+            Syntax::Es(EsSyntax::default()),
+            StringInput::from(&*fm),
+            None,
+        );
+        let mut program = parser.parse_program().expect("parse_program failed");
+
+        let mut mark = Mark::new();
+        // Apply expr_simplifier
+        let mut simplifier = expr_simplifier(mark, Default::default());
+        let mut dce = dead_branch_remover(mark);
+        let mut cp = const_propagation::constant_propagation();
+        let mut inl = inlining::inlining(Default::default());
+        loop {
+            program.visit_mut_with(&mut simplifier);
+            program.visit_mut_with(&mut cp);
+            // program.visit_mut_with(&mut dce);
+
+            if !simplifier.changed() && !dce.changed() {
+                break;
+            }
+            simplifier.reset();
+            dce.reset();
+        }
+
+        // Generate new code from the modified AST
+        let mut buf = Vec::new();
+        let writer = Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None));
+        let mut emitter = Emitter {
+            cfg: Default::default(),
+            cm: cm.clone(),
+            comments: None,
+            wr: writer,
+        };
+        emitter.emit_program(&program).expect("emit_script failed");
+        let output_code = String::from_utf8(buf).expect("String::from_utf8 failed");
+
+        std::fs::write(output_filename, output_code).expect("writing output failed");
+    });
 }
