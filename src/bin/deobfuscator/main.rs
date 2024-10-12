@@ -17,6 +17,7 @@ use std::fs;
 use std::env;
 
 use akamai_deob_rust::transformers::inline_lazy_initializer;
+use akamai_deob_rust::deobfuscator::anti_tempering;
 
 struct Deobfuscator;
 
@@ -271,7 +272,7 @@ impl<'a> Visit for VarFinder {
     }
 }
 
-fn deobfuscate<'a>( program: &'a mut Program, vm: bool) -> &'a mut Program {
+fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str)>, vm: bool) -> &'a mut Program {
     let mut mark = Mark::new();
     // Apply expr_simplifier
     let mut simplifier = expr_simplifier(mark, Default::default());
@@ -322,20 +323,29 @@ fn main() {
             StringInput::from(&*fm),
             None,
         );
+        let mut anti_tempering = anti_tempering::extract_anti_tempering(str);
         let mut program = parser.parse_program().expect("parse_program failed");
         let mut vm_extractor = vm::extractor::extract_vm_script();
         program.visit_mut_with(&mut vm_extractor);
 
         if vm_extractor.get_script_id().len() > 0 {
+            if !anti_tempering.is_none() {
+                let at = anti_tempering.unwrap();
+                if at.1 == vm_extractor.get_script_id() {
+                    anti_tempering = None;
+                }
+            }
             let span = vm_extractor.get_script_span();
 
             let mut vm_code = String::from("(");
             vm_code.push_str(cm.span_to_snippet(span).unwrap().as_str());
             vm_code.push_str(")();");
+            let vm_code_str = vm_code.as_str();
+            let vm_anti_tempering = anti_tempering::extract_anti_tempering(vm_code_str);
 
             let vm_fm = cm.new_source_file(
                 FileName::Custom("vm.js".into()).into(),
-                vm_code.into(),
+                vm_code_str.into(),
             );
             let mut vm_parser = Parser::new(
                 Syntax::Es(EsSyntax::default()),
@@ -343,11 +353,11 @@ fn main() {
                 None,
             );
             let mut vm_program = vm_parser.parse_program().expect("parse_program failed");
-            let deob_vm_program: &mut Program = deobfuscate(&mut vm_program, true);
+            let deob_vm_program: &mut Program = deobfuscate(&mut vm_program, vm_anti_tempering, true);
             let mut vm_replacer = vm::replace::replace_vm_script(vm_extractor.get_script_id(), &deob_vm_program);
             program.visit_mut_with(&mut vm_replacer);
         }
-        let program: &mut Program = deobfuscate(&mut program, false);
+        let program: &mut Program = deobfuscate(&mut program, anti_tempering, false);
 
         // Generate new code from the modified AST
         let mut buf = Vec::new();
