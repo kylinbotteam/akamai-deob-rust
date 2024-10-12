@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::env;
 
+use akamai_deob_rust::transformers::inline_lazy_initializer;
+
 struct Deobfuscator;
 
 impl VisitMut for Deobfuscator {
@@ -299,7 +301,6 @@ fn main() {
         let mut simplifier = expr_simplifier(mark, Default::default());
         let mut dce = dead_branch_remover(mark);
         let mut cp = const_propagation::constant_propagation();
-        let mut inl = inlining::inlining(Default::default());
         loop {
             program.visit_mut_with(&mut simplifier);
             program.visit_mut_with(&mut cp);
@@ -311,6 +312,9 @@ fn main() {
             simplifier.reset();
             dce.reset();
         }
+
+        let mut lazy_initializer_inliner = inline_lazy_initializer::inline_lazy_initializer();
+        program.visit_mut_with(&mut lazy_initializer_inliner);
 
         // Generate new code from the modified AST
         let mut buf = Vec::new();
