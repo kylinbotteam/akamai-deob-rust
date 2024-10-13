@@ -17,6 +17,7 @@ use std::fs;
 use std::env;
 
 use akamai_deob_rust::transformers::inline_lazy_initializer;
+use akamai_deob_rust::transformers::anti_tempering::{self as anti_tempering_key, IAntiTempering};
 use akamai_deob_rust::deobfuscator::anti_tempering;
 
 struct Deobfuscator;
@@ -274,6 +275,21 @@ impl<'a> Visit for VarFinder {
 
 fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str)>, vm: bool) -> &'a mut Program {
     let mut mark = Mark::new();
+
+    let mut anti_tempering_key_value = 0;
+    if let Some(at) = anti_tempering {
+        let mut anti_tempering_key_extractor = anti_tempering_key::extract_anti_tempering_key();
+        program.visit_mut_with(&mut anti_tempering_key_extractor);
+
+        let key_str = anti_tempering_key_extractor.get_anti_tempering_key_str();
+        let key_nonce = anti_tempering_key_extractor.get_anti_tempering_key_nonce();
+        if key_str.is_none() {
+            return program;
+        }
+
+        anti_tempering_key_value = anti_tempering_key::generate_value(at.0, at.1, key_str.as_ref().unwrap().as_str(), key_nonce);
+        std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);    }
+
     // Apply expr_simplifier
     let mut simplifier = expr_simplifier(mark, Default::default());
     let mut dce = dead_branch_remover(mark);
