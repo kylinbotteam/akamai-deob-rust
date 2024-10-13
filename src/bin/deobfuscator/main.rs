@@ -1,3 +1,5 @@
+#![feature(core_intrinsics)]
+
 use akamai_deob_rust::vm;
 use akamai_deob_rust::vm::extractor::IVmScriptExtractor;
 use swc_core::common::{FileName, Globals, GLOBALS, Mark, SourceMap, Span, DUMMY_SP, SourceMapper};
@@ -16,7 +18,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::env;
 
-use akamai_deob_rust::transformers::inline_lazy_initializer;
+use akamai_deob_rust::transformers::{inline_lazy_initializer, inline_ops_fns};
 use akamai_deob_rust::transformers::anti_tempering::{self as anti_tempering_key, IAntiTempering};
 use akamai_deob_rust::deobfuscator::anti_tempering;
 
@@ -288,7 +290,10 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
         }
 
         anti_tempering_key_value = anti_tempering_key::generate_value(at.0, at.1, key_str.as_ref().unwrap().as_str(), key_nonce);
-        std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);    }
+        std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);
+    }
+    let mut ops_fns_inliner = inline_ops_fns::inline_ops_fns();
+    program.visit_mut_with(&mut ops_fns_inliner);
 
     // Apply expr_simplifier
     let mut simplifier = expr_simplifier(mark, Default::default());
