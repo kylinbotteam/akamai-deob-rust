@@ -8,11 +8,13 @@ use swc_core::common::sync::Lrc;
 use swc_core::ecma::codegen::Emitter;
 use swc_core::ecma::codegen::text_writer::JsWriter;
 use swc_core::ecma::parser::{EsSyntax, Parser, Syntax};
+use swc_core::ecma::transforms::base::fixer::fixer;
 use swc_core::ecma::transforms::optimization::simplify::{expr_simplifier, dead_branch_remover, const_propagation, inlining};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_core::common::pass::Repeated;
 use swc_core::ecma::ast::*;
 use swc_core::ecma::ast::VarDeclKind;
+use swc_core::ecma::transforms::base::{fixer, resolver};
 
 use std::collections::HashMap;
 use std::fs;
@@ -292,8 +294,9 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
         anti_tempering_key_value = anti_tempering_key::generate_value(at.0, at.1, key_str.as_ref().unwrap().as_str(), key_nonce);
         std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);
     }
-    let mut ops_fns_inliner = inline_ops_fns::inline_ops_fns();
-    program.visit_mut_with(&mut ops_fns_inliner);
+
+    let mut resolver_pass = resolver(mark, mark, false);
+    program.visit_mut_with(&mut resolver_pass);
 
     // Apply expr_simplifier
     let mut simplifier = expr_simplifier(mark, Default::default());
@@ -313,6 +316,18 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
 
     let mut lazy_initializer_inliner = inline_lazy_initializer::inline_lazy_initializer();
     program.visit_mut_with(&mut lazy_initializer_inliner);
+
+    let mut ops_fns_inliner = inline_ops_fns::inline_ops_fns();
+    loop {
+        program.visit_mut_with(&mut ops_fns_inliner);
+        if ops_fns_inliner.changed() {
+            break
+        }
+        ops_fns_inliner.reset();
+    }
+
+    let mut fixer_pass = fixer(None);
+    program.visit_mut_with(&mut fixer_pass);
 
     program
 }

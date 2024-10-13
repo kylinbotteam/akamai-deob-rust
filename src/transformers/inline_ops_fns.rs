@@ -1,13 +1,15 @@
 #![allow(clippy::borrowed_box)]
 
 #![feature(core_intrinsics)]
+use std::intrinsics;
 use ::std::intrinsics::breakpoint;
 
-use swc_core::common::collections::AHashMap;
+use swc_core::common::collections::{AHashMap, AHashSet};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{as_folder, noop_visit_mut_type, Fold, Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_core::ecma::transforms::base::pass::Repeated;
 
-pub fn inline_ops_fns() -> impl 'static + Fold + VisitMut {
+pub fn inline_ops_fns() -> impl 'static + Fold + VisitMut + Repeated {
     as_folder(InlineOpsFns{
         phase: Phase::Analysis,
         ..Default::default()
@@ -24,6 +26,7 @@ enum Phase {
 
 #[derive(Default)]
 struct InlineOpsFns<'a> {
+    changed: bool,
     phase: Phase,
     scope: Scope<'a>,
     fn_name: Id,
@@ -59,6 +62,20 @@ impl<'a> Scope<'a> {
         }
 
         self.parent.and_then(|parent| parent.find_ops_fn(id))
+    }
+}
+
+impl Repeated for InlineOpsFns<'_> {
+    fn changed(&self) -> bool {
+        self.changed
+    }
+
+    fn reset(&mut self) {
+        self.phase = Phase::Analysis;
+        self.changed = false;
+        self.fn_name = Default::default();
+        self.var_name = Default::default();
+        self.scope = Default::default();
     }
 }
 
@@ -133,6 +150,7 @@ impl VisitMut for InlineOpsFns<'_> {
                                                         stmts.visit_mut_with(&mut renamer);
 
                                                         *e = *stmts;
+                                                        self.changed = true;
                                                         return;
                                                     },
                                                     _ => {}
@@ -152,6 +170,7 @@ impl VisitMut for InlineOpsFns<'_> {
                                                         stmts.visit_mut_with(&mut renamer);
 
                                                         *e = *stmts;
+                                                        self.changed = true;
                                                         return;
                                                     },
                                                     _ => {}
@@ -227,6 +246,9 @@ impl VisitMut for InlineOpsFns<'_> {
     }
 }
 
+impl InlineOpsFns<'_> {
+}
+
 fn is_ops_fn_decl_like<'a,>(fn_decl: &'a FnDecl) -> bool {
     let f = fn_decl.function.as_ref();
 
@@ -274,7 +296,7 @@ struct OpFnsVisitor {
     function_nesting_level: u32,
     params: AHashMap<Id, Box<Param>>,
     fn_name: Id,
-    var_name: Id
+    members: AHashSet<Id>
 }
 
 impl Visit for OpFnsVisitor {
@@ -284,6 +306,36 @@ impl Visit for OpFnsVisitor {
         }
         node.visit_children_with(self);
     }
+
+    fn visit_expr(&mut self, node: &Expr) {
+        if self.done {
+            return
+        }
+        match node {
+            Expr::Member(mem) => {
+                match &*mem.obj {
+                    Expr::Ident(ident) => {
+                        self.members.insert(ident.to_id());
+                    },
+                    _ => ()
+                }
+                match &mem.prop {
+                    MemberProp::Computed(prop) => {
+                        match &*prop.expr {
+                            Expr::Ident(ident) => {
+                                self.members.insert(ident.to_id());
+                            },
+                            _ => ()
+                        }
+                    },
+                    _ => ()
+                }
+            },
+            _ => ()
+        }
+        node.visit_children_with(self);
+    }
+
 
     fn visit_fn_expr(&mut self, node: &FnExpr) {        
         if self.done {
@@ -357,6 +409,7 @@ impl Visit for OpFnsVisitor {
         }
         if node.to_id() == self.fn_name {
         } else if let Some(_) = self.find_param(&node.to_id()) {
+        } else if self.is_member_ident(&node.to_id()) {
         } else {
             self.fail();
         }
@@ -375,6 +428,10 @@ impl OpFnsVisitor {
         }
 
         None
+    }
+
+    fn is_member_ident(&self, id: &Id) -> bool{
+        self.members.contains(id)
     }
 }
 
