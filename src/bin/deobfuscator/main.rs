@@ -291,10 +291,10 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
         let key_nonce = anti_tempering_key_extractor.get_anti_tempering_key_nonce();
         if key_str.is_none() {
             return program;
+        } else {
+            anti_tempering_key_value = anti_tempering_key::generate_value(at.0, at.1, key_str.as_ref().unwrap().as_str(), key_nonce);
+            std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);
         }
-
-        anti_tempering_key_value = anti_tempering_key::generate_value(at.0, at.1, key_str.as_ref().unwrap().as_str(), key_nonce);
-        std::print!("Found antitempering key: {}, {} => {}\n", key_str.as_ref().unwrap().as_str(), key_nonce, anti_tempering_key_value);
     }
 
     let mut resolver_pass = resolver(mark, mark, false);
@@ -338,8 +338,8 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
 }
 
 fn main() {
-    let default_input = &String::from("test.js");
-    let default_output = &String::from("test-out.js");
+    let default_input = &String::from("nike-obfuscated-20220516.js"); // "test.js");
+    let default_output = &String::from("nike-obfuscated-20220516-deob.js"); // "test-out.js");
 
     let args: Vec<String> = env::args().collect();
     let filename = args.get(1).unwrap_or(default_input);
