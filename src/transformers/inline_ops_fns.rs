@@ -5,7 +5,7 @@ use std::intrinsics;
 use ::std::intrinsics::breakpoint;
 
 use swc_core::common::collections::{AHashMap, AHashSet};
-use swc_core::common::DUMMY_SP;
+use swc_core::common::{Spanned, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{as_folder, noop_visit_mut_type, Fold, Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_core::ecma::transforms::base::pass::Repeated;
@@ -126,14 +126,19 @@ impl VisitMut for InlineOpsFns<'_> {
         node.visit_mut_children_with(self);
     }
 
-    fn visit_mut_decl(&mut self, decl: &mut Decl) {
-        decl.visit_mut_children_with(self);
+    fn visit_mut_stmt(&mut self, node: &mut Stmt) {
+        node.visit_mut_children_with(self);
 
         if self.phase == Phase::Inlining {
-            match decl {
-                Decl::Fn(fn_decl) => {
-                    if let Some(expr) = self.scope.find_ops_fn(&fn_decl.ident.to_id()) {
-                        // TODO: remove this function.
+            match node {
+                Stmt::Decl(decl) => {
+                    match decl {
+                        Decl::Fn(fn_decl) => {
+                            if let Some(_) = self.scope.find_ops_fn(&fn_decl.ident.to_id()) {
+                                *node = Stmt::Empty(EmptyStmt{span: decl.span()});
+                            }
+                        },
+                        _ => {}
                     }
                 },
                 _ => {}
@@ -207,6 +212,13 @@ impl VisitMut for InlineOpsFns<'_> {
                             }
                         },
                         _ => ()
+                    }
+                },
+                Expr::Fn(fn_decl) => {
+                    if let Some(ident) = &fn_decl.ident {
+                        if let Some(expr) = self.scope.find_ops_fn(&ident.to_id()) {
+                            *e = Expr::Invalid(Invalid{span: e.span()});
+                        }
                     }
                 },
                 _ => ()
