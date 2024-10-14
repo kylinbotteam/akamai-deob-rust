@@ -23,13 +23,15 @@ enum Phase {
     #[default]
     Analysis,
     Inlining,
+    Cleanup
 }
 
 #[derive(Default)]
 struct InlineOpsFns<'a> {
     changed: bool,
     phase: Phase,
-    scope: Scope<'a>
+    scope: Scope<'a>,
+    inlined: AHashSet<Id>
 }
 
 enum OpsFn {
@@ -73,6 +75,7 @@ impl Repeated for InlineOpsFns<'_> {
         self.phase = Phase::Analysis;
         self.changed = false;
         self.scope = Default::default();
+        self.inlined.clear();
     }
 }
 
@@ -87,6 +90,10 @@ impl VisitMut for InlineOpsFns<'_> {
 
         // Inline
         self.phase = Phase::Inlining;
+        program.visit_mut_children_with(self);
+
+        // Cleanup
+        self.phase = Phase::Cleanup;
         program.visit_mut_children_with(self);
 
         self.phase = old_phase;
@@ -141,6 +148,11 @@ impl VisitMut for InlineOpsFns<'_> {
                         _ => {}
                     }
                 },
+                Stmt::Expr(expr) => {
+                    if expr.expr.is_invalid() {
+                        *node = Stmt::Empty(EmptyStmt{span: expr.span()});
+                    }
+                }
                 _ => {}
             }
         }
@@ -173,6 +185,7 @@ impl VisitMut for InlineOpsFns<'_> {
                                                         };
                                                         stmts.visit_mut_with(&mut renamer);
 
+                                                        self.inlined.insert(i.to_id());
                                                         *e = Expr::Paren(ParenExpr{
                                                             span: DUMMY_SP,
                                                             expr: stmts
@@ -196,6 +209,7 @@ impl VisitMut for InlineOpsFns<'_> {
                                                         };
                                                         stmts.visit_mut_with(&mut renamer);
 
+                                                        self.inlined.insert(i.to_id());
                                                         *e = *stmts;
                                                         self.changed = true;
                                                         return;
@@ -214,10 +228,12 @@ impl VisitMut for InlineOpsFns<'_> {
                         _ => ()
                     }
                 },
-                Expr::Fn(fn_decl) => {
-                    if let Some(ident) = &fn_decl.ident {
-                        if let Some(expr) = self.scope.find_ops_fn(&ident.to_id()) {
-                            *e = Expr::Invalid(Invalid{span: e.span()});
+                Expr::Fn(fn_expr) => {
+                    if let Some(ident) = &fn_expr.ident {
+                        if self.inlined.contains(&ident.to_id()) {
+                            if let Some(_) = self.scope.find_ops_fn(&ident.to_id()) {
+                                *e = Expr::Invalid(Invalid{span: e.span()});
+                            }
                         }
                     }
                 },
