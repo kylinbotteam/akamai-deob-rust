@@ -1,5 +1,6 @@
 #![feature(core_intrinsics)]
 
+use akamai_deob_rust::transformers::inline_window_var;
 use akamai_deob_rust::util::syntax_context;
 use akamai_deob_rust::vm;
 use akamai_deob_rust::vm::extractor::IVmScriptExtractor;
@@ -329,6 +330,9 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
 
     let mut fixer_pass = fixer(None);
     program.visit_mut_with(&mut fixer_pass);
+
+    let mut window_var_inliner = inline_window_var::inline_window_var(mark);
+    program.visit_mut_with(&mut window_var_inliner);
 
     program
 }
