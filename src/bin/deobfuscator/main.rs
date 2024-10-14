@@ -1,5 +1,6 @@
 #![feature(core_intrinsics)]
 
+use akamai_deob_rust::util::syntax_context;
 use akamai_deob_rust::vm;
 use akamai_deob_rust::vm::extractor::IVmScriptExtractor;
 use swc_core::common::{FileName, Globals, GLOBALS, Mark, SourceMap, Span, DUMMY_SP, SourceMapper};
@@ -318,13 +319,13 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
     program.visit_mut_with(&mut lazy_initializer_inliner);
 
     let mut ops_fns_inliner = inline_ops_fns::inline_ops_fns();
-    loop {
-        program.visit_mut_with(&mut ops_fns_inliner);
-        if ops_fns_inliner.changed() {
-            break
-        }
-        ops_fns_inliner.reset();
-    }
+    program.visit_mut_with(&mut ops_fns_inliner);
+
+    // reset the syntax context of the ast tree
+    let mut remove_syntax_context = syntax_context::remove_syntax_context();
+    program.visit_mut_with(&mut remove_syntax_context);
+    let mut resolver_pass = resolver(mark, mark, false);
+    program.visit_mut_with(&mut resolver_pass);
 
     let mut fixer_pass = fixer(None);
     program.visit_mut_with(&mut fixer_pass);

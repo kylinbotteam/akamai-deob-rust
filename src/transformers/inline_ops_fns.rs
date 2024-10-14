@@ -5,6 +5,7 @@ use std::intrinsics;
 use ::std::intrinsics::breakpoint;
 
 use swc_core::common::collections::{AHashMap, AHashSet};
+use swc_core::common::DUMMY_SP;
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{as_folder, noop_visit_mut_type, Fold, Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_core::ecma::transforms::base::pass::Repeated;
@@ -28,9 +29,7 @@ enum Phase {
 struct InlineOpsFns<'a> {
     changed: bool,
     phase: Phase,
-    scope: Scope<'a>,
-    fn_name: Id,
-    var_name: Id
+    scope: Scope<'a>
 }
 
 enum OpsFn {
@@ -73,8 +72,6 @@ impl Repeated for InlineOpsFns<'_> {
     fn reset(&mut self) {
         self.phase = Phase::Analysis;
         self.changed = false;
-        self.fn_name = Default::default();
-        self.var_name = Default::default();
         self.scope = Default::default();
     }
 }
@@ -96,17 +93,37 @@ impl VisitMut for InlineOpsFns<'_> {
     }
 
     fn visit_mut_var_declarator(&mut self, node: &mut VarDeclarator) {
-        let var_name = self.var_name.clone();
         match &node.name {
             Pat::Ident(ident) => {
-                self.var_name = ident.to_id();
+                if let Some(init) = &node.init {
+                    match &**init {
+                        Expr::Fn(fn_expr) => {
+                            if self.phase == Phase::Analysis {
+                                if is_ops_fn_expr_like(fn_expr) {
+                                    std::print!("Scanning op fns: {}\n", ident.sym);
+                    
+                                    let mut visitor = OpFnsVisitor{
+                                        ..Default::default()
+                                    };
+                                    fn_expr.visit_with(&mut visitor);
+                    
+                                    if visitor.done && visitor.result {
+                                        std::print!("Found op fns: {}\n", ident);
+                                        self.scope.fns.insert(ident.to_id(), OpsFn::Expr(Box::new(fn_expr.clone())));
+                                    }
+                                    return
+                                }
+                            } else if self.phase == Phase::Inlining {
+                            } 
+                        },
+                        _ => {}
+                    }
+                }
             },
-            _ => {
-                self.var_name = Default::default();
-            }
+            _ => {}
         }
+
         node.visit_mut_children_with(self);
-        self.var_name = var_name;
     }
 
     fn visit_mut_decl(&mut self, decl: &mut Decl) {
@@ -125,6 +142,8 @@ impl VisitMut for InlineOpsFns<'_> {
     }
 
     fn visit_mut_expr(&mut self, e: &mut Expr) {
+        e.visit_mut_children_with(self);
+
         if self.phase == Phase::Inlining {
             match e {
                 Expr::Call(call_expr) => {
@@ -149,7 +168,10 @@ impl VisitMut for InlineOpsFns<'_> {
                                                         };
                                                         stmts.visit_mut_with(&mut renamer);
 
-                                                        *e = *stmts;
+                                                        *e = Expr::Paren(ParenExpr{
+                                                            span: DUMMY_SP,
+                                                            expr: stmts
+                                                        });
                                                         self.changed = true;
                                                         return;
                                                     },
@@ -186,23 +208,17 @@ impl VisitMut for InlineOpsFns<'_> {
                         },
                         _ => ()
                     }
-                }
-
+                },
                 _ => ()
             }
         }
-
-        e.visit_mut_children_with(self);
     }
 
     fn visit_mut_fn_decl(&mut self, n: &mut FnDecl) {
-        let fn_name = self.fn_name.clone();
-        self.fn_name = n.ident.to_id();
         n.visit_mut_children_with(self);
 
         if self.phase == Phase::Analysis {
-            let name: &(swc::atoms::Atom, swc_core::common::SyntaxContext) = if self.fn_name.0.len() > 0 { &self.fn_name } else { &self.var_name };
-            if name.0.len() > 0 && is_ops_fn_decl_like(n) {
+            if is_ops_fn_decl_like(n) {
                 std::print!("Scanning op fns: {}\n", n.ident.sym);
 
                 let mut visitor = OpFnsVisitor{
@@ -211,38 +227,30 @@ impl VisitMut for InlineOpsFns<'_> {
                 n.visit_with(&mut visitor);
 
                 if visitor.done && visitor.result {
-                    std::print!("Found op fns: {}\n", name.0);
-                    self.scope.fns.insert(name.clone(), OpsFn::Decl(Box::new(n.clone())));
+                    std::print!("Found op fns: {}\n", n.ident.sym);
+                    self.scope.fns.insert(n.ident.to_id(), OpsFn::Decl(Box::new(n.clone())));
                 }
             }
         }
-        self.fn_name = fn_name;
     }
 
     fn visit_mut_fn_expr(&mut self, n: &mut FnExpr) {
-        let fn_name = self.fn_name.clone();
-        if n.ident.is_some() {
-            self.fn_name = n.ident.as_ref().unwrap().to_id();
-        } else {
-            self.fn_name = Default::default();
-        }
         n.visit_mut_children_with(self);
 
         if self.phase == Phase::Analysis {
-            let name: &(swc::atoms::Atom, swc_core::common::SyntaxContext) = if self.fn_name.0.len() > 0 { &self.fn_name } else { &self.var_name };
-            if name.0.len() > 0 && is_ops_fn_expr_like(n) {
+            if n.ident.is_some() && is_ops_fn_expr_like(n) {
                 let mut visitor = OpFnsVisitor{
                     ..Default::default()
                 };
                 n.visit_with(&mut visitor);
 
                 if visitor.done && visitor.result {
-                    std::print!("Found op fns: {}\n", name.0);
-                    self.scope.fns.insert(name.clone(), OpsFn::Expr(Box::new(n.clone())));
+                    let ident = n.ident.as_ref().unwrap();
+                    std::print!("Found op fns: {}\n", ident.sym);
+                    self.scope.fns.insert(ident.to_id(), OpsFn::Expr(Box::new(n.clone())));
                 }
             }
         }
-        self.fn_name = fn_name;
     }
 }
 
