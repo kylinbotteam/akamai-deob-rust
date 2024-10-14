@@ -1,9 +1,5 @@
 #![allow(clippy::borrowed_box)]
 
-#![feature(core_intrinsics)]
-use std::intrinsics;
-use ::std::intrinsics::breakpoint;
-
 use swc_core::common::collections::{AHashMap, AHashSet};
 use swc_core::common::{Spanned, DUMMY_SP};
 use swc_core::ecma::ast::*;
