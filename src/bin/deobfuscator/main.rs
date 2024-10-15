@@ -10,13 +10,14 @@ use swc_core::common::sync::Lrc;
 use swc_core::ecma::codegen::Emitter;
 use swc_core::ecma::codegen::text_writer::JsWriter;
 use swc_core::ecma::parser::{EsSyntax, Parser, Syntax};
-use swc_core::ecma::transforms::base::fixer::fixer;
-use swc_core::ecma::transforms::optimization::simplify::{expr_simplifier, dead_branch_remover, const_propagation, inlining};
+use swc_core::ecma::transforms::optimization::simplify::{expr_simplifier, dead_branch_remover, const_propagation};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_core::common::pass::Repeated;
 use swc_core::ecma::ast::*;
 use swc_core::ecma::ast::VarDeclKind;
 use swc_core::ecma::transforms::base::{fixer, resolver};
+
+use tracing_subscriber::EnvFilter;
 
 use std::collections::HashMap;
 use std::fs;
@@ -24,6 +25,7 @@ use std::env;
 
 use akamai_deob_rust::transformers::{inline_lazy_initializer, inline_ops_fns};
 use akamai_deob_rust::transformers::anti_tempering::{self as anti_tempering_key, IAntiTempering};
+use akamai_deob_rust::transformers::constant;
 use akamai_deob_rust::deobfuscator::anti_tempering;
 
 struct Deobfuscator;
@@ -328,16 +330,37 @@ fn deobfuscate<'a>( program: &'a mut Program, anti_tempering: Option<(&str, &str
     let mut resolver_pass = resolver(mark, mark, false);
     program.visit_mut_with(&mut resolver_pass);
 
-    let mut fixer_pass = fixer(None);
+    let mut fixer_pass = fixer::fixer(None);
     program.visit_mut_with(&mut fixer_pass);
 
     let mut window_var_inliner = inline_window_var::inline_window_var(mark);
     program.visit_mut_with(&mut window_var_inliner);
 
+    // let mut inliner = constant::inlining(Default::default());
+    // program.visit_mut_with(&mut inliner);
+
     program
 }
 
+fn init() {
+    let log_env =
+        env::var("RUST_LOG").unwrap_or_else(|_| "info,swc_timer=off".into());
+
+    let logger = tracing_subscriber::FmtSubscriber::builder()
+        .without_time()
+        .with_target(false)
+        .with_ansi(true)
+        .with_env_filter(EnvFilter::from_env(&log_env))
+        .with_writer(std::io::stderr)
+        .pretty()
+        .finish();
+
+    tracing::subscriber::set_global_default(logger).expect("failed to setup tracing");
+}
+
 fn main() {
+    init();
+
     let default_input = &String::from("nike-obfuscated-20220516.js"); // "test.js");
     let default_output = &String::from("nike-obfuscated-20220516-deob.js"); // "test-out.js");
 
